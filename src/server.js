@@ -1,8 +1,9 @@
 import express from "express";
 import "dotenv/config";
 import { db } from "./config/db.js";
-import { tasks, taskApplicants } from "./config/schema.js";
-import { eq, and, desc } from "drizzle-orm";
+import { tasks, taskApplicants } from "./db/schema.js";
+import { eq, and, desc, inArray } from "drizzle-orm";
+import fetch from "node-fetch"; // or global fetch in Node 18+
 
 const app = express();
 app.use(express.json());
@@ -20,6 +21,12 @@ app.post("/api/tasks", async (req, res) => {
     if (!title || !description || !reward || !deadline || !postedBy) {
       return res.status(400).json({ error: "Missing required fields" });
     }
+    // Convert deadline string to Date object
+    const deadlineDate = new Date(deadline);
+
+    if (isNaN(deadlineDate.getTime())) {
+      return res.status(400).json({ error: "Invalid deadline format" });
+    }
 
     const newTask = await db
       .insert(tasks)
@@ -27,7 +34,7 @@ app.post("/api/tasks", async (req, res) => {
         title,
         description,
         reward,
-        deadline,
+        deadline: deadlineDate,
         postedBy,
       })
       .returning();
@@ -107,6 +114,9 @@ app.delete("/api/tasks/:id", async (req, res) => {
 app.get("/api/tasks/:id", async (req, res) => {
   try {
     const taskId = Number(req.params.id);
+    if (isNaN(taskId)) {
+      return res.status(400).json({ error: "Invalid task ID" });
+    }
 
     const task = await db.select().from(tasks).where(eq(tasks.id, taskId));
 
@@ -117,27 +127,6 @@ app.get("/api/tasks/:id", async (req, res) => {
     res.status(200).json(task[0]);
   } catch (error) {
     console.error("Error fetching task", error);
-    res.status(500).json({ error: "Something went wrong" });
-  }
-});
-
-// endpoint for fetching tasks posted by a specific user
-app.get("/api/tasks/user/:userId", async (req, res) => {
-  try {
-    const userId = req.params.userId;
-
-    if (!userId) {
-      return res.status(400).json({ error: "Missing user ID" });
-    }
-
-    const userTasks = await db
-      .select()
-      .from(tasks)
-      .where(eq(tasks.postedBy, userId));
-
-    res.status(200).json(userTasks);
-  } catch (error) {
-    console.error("Error fetching user tasks:", error);
     res.status(500).json({ error: "Something went wrong" });
   }
 });
@@ -175,7 +164,7 @@ app.post("/api/tasks/:id/apply", async (req, res) => {
 
     res.status(201).json(newEntry[0]);
   } catch (error) {
-    console.error("Error applying to task:", error);
+    console.error("Error applying to task: try one more time", error);
     res.status(500).json({ error: "Something went wrong" });
   }
 });
@@ -198,5 +187,75 @@ app.get("/api/tasks/:id/applicants", async (req, res) => {
   } catch (error) {
     console.error("Error fetching applicants:", error);
     res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+// endpoint for fetching all tasks a user has applied to
+app.get("/api/applications/user/:userId", async (req, res) => {
+  try {
+    const userId = req.params.userId;
+
+    if (!userId) {
+      return res.status(400).json({ error: "Missing user ID" });
+    }
+
+    // Get all taskIds the user has applied to
+    const applications = await db
+      .select()
+      .from(taskApplicants)
+      .where(eq(taskApplicants.userId, userId));
+
+    // all these we were doing to fetch the task details, but now we are just returning the count
+    // const taskIds = applications.map((app) => app.taskId);
+    // if (taskIds.length === 0) {
+    //   return res.status(200).json([]); // No applications
+    // }
+    // // Fetch the task details for these taskIds
+    // const appliedTasks = await db
+    //   .select()
+    //   .from(tasks).where(inArray(tasks.id, taskIds))
+
+    // Return only the count
+    res.status(200).json(applications);
+  } catch (error) {
+    console.error("Error fetching applied tasks:", error);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+});
+// endpoint for fetching tasks posted by a specific user
+app.get("/api/tasks/user/:userId", async (req, res) => {
+  try {
+    const userId = req.params.userId;
+
+    if (!userId) {
+      return res.status(400).json({ error: "Missing user ID" });
+    }
+
+    const userTasks = await db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.postedBy, userId));
+
+    res.status(200).json(userTasks);
+  } catch (error) {
+    console.error("Error fetching user tasks:", error);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+// endpoint for fetching the first name of a user by their ID from clerk
+app.get("/api/user/:userId/firstname", async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const clerkRes = await fetch(`https://api.clerk.dev/v1/users/${userId}`, {
+      headers: {
+        Authorization: `Bearer ${process.env.CLERK_SECRET_KEY}`,
+      },
+    });
+    const data = await clerkRes.json();
+    res.json({ firstName: data.first_name || userId });
+  } catch (e) {
+    res.json({ firstName: userId });
+    res.status(500).json({ error: "Failed to fetch user data" });
   }
 });
